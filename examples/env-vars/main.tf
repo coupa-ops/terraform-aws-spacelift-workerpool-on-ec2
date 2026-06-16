@@ -15,7 +15,7 @@ provider "aws" {
   default_tags {
     tags = {
       TfModule = "terraform-aws-spacelift-workerpool-on-ec2"
-      TestCase = "ExtraIamStatements"
+      TestCase = "env-vars"
     }
   }
 }
@@ -37,10 +37,8 @@ data "aws_subnets" "this" {
 }
 
 resource "random_string" "worker_pool_id" {
-  length  = 26
-  numeric = true
-  # Use special and override special to allow only uppercase letters and numbers
-  # but exclude I, L, O, and U as it does not conform to the regex used by Spacelift
+  length           = 26
+  numeric          = true
   special          = true
   override_special = "ABCDEFGHJKMNPQRSTVWXYZ"
   lower            = false
@@ -54,11 +52,14 @@ module "this" {
 
   worker_pool_id = random_string.worker_pool_id.id
 
-  configuration = <<-EOT
-    export SPACELIFT_SENSITIVE_OUTPUT_UPLOAD_ENABLED=true
-    export SPACELIFT_LAUNCHER_RUN_TIMEOUT=120m
-  EOT
+  # Mix of plain and sensitive env_vars entries.
   env_vars = {
+    # Plain value — passed as-is in user data and directly as a Lambda env var.
+    LOG_LEVEL = {
+      value = "debug"
+    }
+    # Sensitive values — redacted in plan output, stored in Secrets Manager for
+    # EC2 workers and as individual Secrets Manager secrets for Lambda functions.
     SPACELIFT_TOKEN = {
       value     = "<token-here>"
       sensitive = true
@@ -72,30 +73,5 @@ module "this" {
   security_groups = [data.aws_security_group.this.id]
   vpc_subnets     = data.aws_subnets.this.ids
 
-  extra_iam_statements = [
-    data.aws_iam_policy_document.extra.json,
-  ]
-
   manage_log_groups = false
-}
-
-data "aws_iam_policy_document" "extra" {
-  statement {
-    sid    = "HealthReadOnly"
-    effect = "Allow"
-    actions = [
-      "health:Describe*",
-    ]
-    resources = ["*"]
-  }
-  statement {
-    sid    = "CloudtrailReadOnly"
-    effect = "Allow"
-    actions = [
-      "cloudtrail:Describe*",
-      "cloudtrail:Get*",
-      "cloudtrail:List*",
-    ]
-    resources = ["*"]
-  }
 }

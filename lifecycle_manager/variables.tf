@@ -80,3 +80,19 @@ variable "lifecycle_hook_timeout" {
   description = "Timeout of the ASG lifecycle hook in seconds. The Lambda will stop retrying drain attempts after this period since the hook will have already expired."
   type        = number
 }
+
+variable "env_vars" {
+  description = "Environment variables to pass to the lifecycle manager Lambda function."
+  sensitive   = true
+  type = map(object({
+    value     = optional(string)
+    sensitive = optional(bool, false)
+  }))
+  default = {}
+}
+
+variable "secret_env_var_arns" {
+  description = "Map of environment variable name to an existing Secrets Manager secret ARN."
+  type        = map(string)
+  default     = {}
+}

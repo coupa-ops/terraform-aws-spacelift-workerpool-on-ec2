@@ -100,8 +100,18 @@ variable "ipv6_allowed_for_dual_stack" {
   default     = null
 }
 
-variable "extra_env" {
-  description = "Additional environment variables to pass to the autoscaler Lambda function."
+variable "env_vars" {
+  description = "Environment variables to pass to the autoscaler Lambda function."
+  sensitive   = true
+  type = map(object({
+    value     = optional(string)
+    sensitive = optional(bool, false)
+  }))
+  default = {}
+}
+
+variable "secret_env_var_arns" {
+  description = "Map of environment variable name to an existing Secrets Manager secret ARN."
   type        = map(string)
   default     = {}
 }

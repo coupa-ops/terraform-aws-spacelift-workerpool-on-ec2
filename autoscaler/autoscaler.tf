@@ -1,4 +1,58 @@
 locals {
+  # Non-sensitive value entries — passed directly as Lambda env vars.
+  env_vars_direct = {
+    for name, cfg in var.env_vars :
+    name => cfg.value
+    if cfg.value != null && cfg.sensitive != true
+  }
+
+  # Sensitive value entries — stored as individual Secrets Manager secrets so
+  # the value is never embedded in the Lambda configuration.
+  env_vars_sensitive_values = {
+    for name, cfg in var.env_vars :
+    name => cfg.value
+    if cfg.value != null && cfg.sensitive == true
+  }
+
+  # NAME_SECRET_ARN env vars: explicit secret_env_var_arns entries + sensitive value secrets.
+  env_vars_secret_refs = merge(
+    { for name, arn in var.secret_env_var_arns : "${name}_SECRET_ARN" => arn },
+    { for name, secret in aws_secretsmanager_secret.sensitive_env_var : "${name}_SECRET_ARN" => secret.arn }
+  )
+
+  # All secret ARNs the Lambda IAM role needs to read.
+  env_vars_secret_arns = concat(
+    values(var.secret_env_var_arns),
+    [for _, secret in aws_secretsmanager_secret.sensitive_env_var : secret.arn],
+  )
+
+  uses_secrets_extension = length(var.secret_env_var_arns) > 0 || length(local.env_vars_sensitive_values) > 0
+}
+
+# Individual Secrets Manager secrets for each sensitive value entry.
+resource "aws_secretsmanager_secret" "sensitive_env_var" {
+  for_each = nonsensitive(toset(keys(local.env_vars_sensitive_values)))
+
+  name                    = "${local.function_name}-env-${each.key}"
+  recovery_window_in_days = 0
+  tags                    = var.additional_tags
+}
+
+resource "aws_secretsmanager_secret_version" "sensitive_env_var" {
+  for_each = nonsensitive(toset(keys(local.env_vars_sensitive_values)))
+
+  secret_id     = aws_secretsmanager_secret.sensitive_env_var[each.key].id
+  secret_string = local.env_vars_sensitive_values[each.key]
+}
+
+# Resolve the AWS Parameters and Secrets Lambda Extension layer ARN for this
+# region and architecture via the public SSM parameter AWS maintains.
+data "aws_ssm_parameter" "secrets_extension_layer" {
+  count = local.uses_secrets_extension ? 1 : 0
+  name  = "/aws/service/aws-parameters-and-secrets-lambda-extension/${local.architecture == "arm64" ? "arm64" : "x86"}/latest"
+}
+
+locals {
   download_folder    = var.worker_pool_id # Unique folder name to avoid race conditions when downloading the archive in parallel
   architecture       = coalesce(var.autoscaling_configuration.architecture, "amd64")
   autoscaler_zip     = "${local.download_folder}/ec2-workerpool-autoscaler_linux_${local.architecture}.zip"
@@ -86,6 +140,7 @@ resource "aws_lambda_function" "autoscaler" {
   runtime       = "provided.al2023"
   architectures = [var.autoscaling_configuration.architecture == "amd64" ? "x86_64" : coalesce(var.autoscaling_configuration.architecture, "x86_64")]
   timeout       = var.autoscaling_configuration.timeout != null ? var.autoscaling_configuration.timeout : 30
+  layers        = local.uses_secrets_extension ? [data.aws_ssm_parameter.secrets_extension_layer[0].value] : []
 
   dynamic "vpc_config" {
     for_each = var.spacelift_vpc_subnet_ids != null && var.spacelift_vpc_security_group_ids != null ? ["USE_VPC_CONFIG"] : []
@@ -107,7 +162,7 @@ resource "aws_lambda_function" "autoscaler" {
       AUTOSCALING_MAX_CREATE        = var.autoscaling_configuration.max_create != null ? var.autoscaling_configuration.max_create : 1
       AUTOSCALING_MAX_KILL          = var.autoscaling_configuration.max_terminate != null ? var.autoscaling_configuration.max_terminate : 1
       AUTOSCALING_SCALE_DOWN_DELAY  = var.autoscaling_configuration.scale_down_delay != null ? var.autoscaling_configuration.scale_down_delay : 0
-    }, var.autoscaling_configuration.ca_bundle != null ? { SPACELIFT_CA_BUNDLE = var.autoscaling_configuration.ca_bundle } : {}, var.extra_env)
+    }, var.autoscaling_configuration.ca_bundle != null ? { SPACELIFT_CA_BUNDLE = var.autoscaling_configuration.ca_bundle } : {}, local.env_vars_direct, local.env_vars_secret_refs)
   }
 
   tracing_config {
